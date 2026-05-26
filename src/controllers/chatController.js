@@ -74,6 +74,57 @@ const isMissingTableColumnError = (error, columnName) =>
   error?.message?.toLowerCase().includes(columnName.toLowerCase()) ||
   error?.details?.toLowerCase().includes(columnName.toLowerCase());
 
+const TRAVEL_PLANNER_SYSTEM_PROMPT = `You are a professional AI Travel Planner EXPERT. Your ONLY job is to create detailed, specific travel itineraries.
+
+**ABSOLUTE RULES - NO EXCEPTIONS:**
+1. ❌ NEVER EVER ask questions
+2. ❌ NEVER say "I need more info", "Can you provide", "Could you tell me"
+3. ❌ NEVER apologize
+4. ✅ ALWAYS provide a complete travel plan
+5. ✅ ALWAYS make confident assumptions
+6. ✅ ALWAYS use the format below
+
+**HOW TO HANDLE INPUT:**
+- ANY input mentioning a place = destination
+- Dates missing = assume 3 days
+- Budget missing = assume ₹20,000-30,000/person
+- Number of people missing = assume 2 people
+- Activities missing = provide your expert recommendations
+
+**OUTPUT FORMAT (MUST FOLLOW EXACTLY):**
+
+🌍 **DESTINATION:** [City Name, Country]
+
+💰 **BUDGET:** ₹[Amount] per person for [days] days
+
+📅 **BEST TIME TO VISIT:** [Month/Season] - [Reason]
+
+🏨 **ACCOMMODATION:**
+• Hotel 1: ₹[Price] - [1-2 lines description]
+• Hotel 2: ₹[Price] - [1-2 lines description]
+
+✈️ **DAY-BY-DAY ITINERARY:**
+Day 1: [Morning activity] → [Afternoon activity] → [Evening activity]
+Day 2: [Morning activity] → [Afternoon activity] → [Evening activity]
+Day 3: [Morning activity] → [Afternoon activity] → [Evening activity]
+
+🎯 **MUST-DO ACTIVITIES:**
+• [Activity with duration and cost]
+• [Activity with duration and cost]
+
+🍽️ **FOOD & DINING:** [Local cuisines to try]
+
+💡 **INSIDER TIPS:** [2-3 pro tips]
+
+EXAMPLES OF CORRECT RESPONSES:
+Input: "delhi trip"
+Output: [Create Delhi 3-day itinerary with budget, hotels, activities]
+
+Input: "name:arpita, email:test@gmail.com, destination:goa"
+Output: [Create Goa 3-day itinerary with full details]
+
+REMEMBER: NO QUESTIONS. ONLY TRAVEL PLANS.`;
+
 export const sendMessage = async (req, res) => {
   try {
     console.log('Send message request:', req.body);
@@ -97,12 +148,12 @@ export const sendMessage = async (req, res) => {
     }
 
     const hasBookingIntent = detectBookingIntent(message);
+    const leadDetails = parseLeadDetails(message);
 
-    if (hasBookingIntent) {
-      const leadDetails = parseLeadDetails(message);
-
-      if (hasLeadDetails(leadDetails)) {
-        const { error: leadError } = await supabase.from('leads').insert([
+    // Save lead details if detected (but don't return early)
+    if (hasBookingIntent && hasLeadDetails(leadDetails)) {
+      try {
+        await supabase.from('leads').insert([
           {
             tenant_id: tenantId,
             name: leadDetails.name,
@@ -113,31 +164,12 @@ export const sendMessage = async (req, res) => {
             source: 'chatbot',
           },
         ]);
-
-        if (leadError) {
-          throw leadError;
-        }
-
-        return res.status(200).json({
-          success: true,
-          data: {
-            conversationId,
-            reply: 'Thanks! Our travel expert will contact you shortly.',
-            isLead: true,
-          },
-        });
+      } catch (leadError) {
+        console.warn('Lead insertion warning:', leadError);
+        // Don't throw - continue with chat response
       }
-
-      return res.status(200).json({
-        success: true,
-        data: {
-          conversationId,
-          reply:
-            "Great! I'd love to help you plan your trip. Could you please provide: your name, email, and destination you're interested in?",
-          isLeadCollection: true,
-        },
-      });
     }
+    // Continue to AI response regardless of lead detection
 
     let activeConversationId = conversationId ?? null;
 
@@ -200,14 +232,24 @@ export const sendMessage = async (req, res) => {
       throw historyError;
     }
 
-    const messagesForOpenAI = conversationHistory.map((msg) => ({
-      role: msg.role,
-      content: msg.content,
-    }));
+    const messagesForOpenAI = [
+      {
+        role: 'system',
+        content: TRAVEL_PLANNER_SYSTEM_PROMPT,
+      },
+      ...conversationHistory.map((msg) => ({
+        role: msg.role,
+        content: msg.content,
+      })),
+    ];
 
     const response = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
+      model: 'gpt-4',
       messages: messagesForOpenAI,
+      temperature: 0.3,
+      max_tokens: 1000,
+      frequency_penalty: 0.5,
+      presence_penalty: 0.5,
     });
 
     const aiMessage = response.choices[0]?.message?.content?.trim() || 'I can help with that destination!';
